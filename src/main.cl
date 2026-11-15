@@ -7,13 +7,15 @@ import "std/net.cl"
 import "src/server.cl"
 
 fn handle_client(store: RedisStore, client_fd: int) -> int:
+    session := session_new(client_fd)
     while 1:
         req := tcp_read(client_fd, 65536)
         if len(req) == 0:
             break
-        resp := server_process_buffer(store, req)
+        resp := server_process_buffer_session(store, session, req)
         if len(resp) > 0:
             tcp_write(client_fd, resp)
+    store_unsubscribe_all(store, client_fd)
     tcp_close(client_fd)
     return 0
 

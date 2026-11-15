@@ -4,6 +4,7 @@
 // ==============================================================================
 
 import "std/clb.cl"
+import "std/net.cl"
 
 model RedisEntry:
     key: string
@@ -13,10 +14,17 @@ model RedisEntry:
     hash_keys: vector[string]
     hash_vals: vector[string]
     set_members: vector[string]
+    zset_members: vector[string]
+    zset_scores: vector[string]
     expire_at: int
+
+model PubSubSubscription:
+    channel: string
+    client_fd: int
 
 model RedisStore:
     entries: vector[RedisEntry]
+    subs: vector[PubSubSubscription]
     now_tick: int
     total_commands: int
 
@@ -25,31 +33,49 @@ fn entry_new_string(key: string, val: string, exp: int) -> RedisEntry:
     let hk: vector[string] = []
     let hv: vector[string] = []
     let sm: vector[string] = []
-    return RedisEntry(key, val, "string", el, hk, hv, sm, exp)
+    let zm: vector[string] = []
+    let zs: vector[string] = []
+    return RedisEntry(key, val, "string", el, hk, hv, sm, zm, zs, exp)
 
 fn entry_new_list(key: string, items: vector[string]) -> RedisEntry:
     let hk: vector[string] = []
     let hv: vector[string] = []
     let sm: vector[string] = []
-    return RedisEntry(key, "", "list", items, hk, hv, sm, -1)
+    let zm: vector[string] = []
+    let zs: vector[string] = []
+    return RedisEntry(key, "", "list", items, hk, hv, sm, zm, zs, -1)
 
 fn entry_new_hash(key: string) -> RedisEntry:
     let el: vector[string] = []
     let hk: vector[string] = []
     let hv: vector[string] = []
     let sm: vector[string] = []
-    return RedisEntry(key, "", "hash", el, hk, hv, sm, -1)
+    let zm: vector[string] = []
+    let zs: vector[string] = []
+    return RedisEntry(key, "", "hash", el, hk, hv, sm, zm, zs, -1)
 
 fn entry_new_set(key: string) -> RedisEntry:
     let el: vector[string] = []
     let hk: vector[string] = []
     let hv: vector[string] = []
     let sm: vector[string] = []
-    return RedisEntry(key, "", "set", el, hk, hv, sm, -1)
+    let zm: vector[string] = []
+    let zs: vector[string] = []
+    return RedisEntry(key, "", "set", el, hk, hv, sm, zm, zs, -1)
+
+fn entry_new_zset(key: string) -> RedisEntry:
+    let el: vector[string] = []
+    let hk: vector[string] = []
+    let hv: vector[string] = []
+    let sm: vector[string] = []
+    let zm: vector[string] = []
+    let zs: vector[string] = []
+    return RedisEntry(key, "", "zset", el, hk, hv, sm, zm, zs, -1)
 
 fn store_new() -> RedisStore:
     let list: vector[RedisEntry] = []
-    return RedisStore(list, 0, 0)
+    let s_list: vector[PubSubSubscription] = []
+    return RedisStore(list, s_list, 0, 0)
 
 fn store_find_idx(s: RedisStore, key: string) -> int:
     let mut i: int = 0
@@ -64,7 +90,7 @@ fn store_find_idx(s: RedisStore, key: string) -> int:
     return -1 // not found
 
 // ------------------------------------------------------------------------------
-// String Operations (SET, GET, EXISTS, DEL, INCR, STRLEN, APPEND)
+// String Operations (SET, GET, EXISTS, DEL, INCR, STRLEN, APPEND, SETNX, GETSET, GETRANGE, SETRANGE)
 // ------------------------------------------------------------------------------
 
 fn store_set(s: RedisStore, key: string, val: string, ttl_seconds: int) -> void:
@@ -87,6 +113,10 @@ fn store_set(s: RedisStore, key: string, val: string, ttl_seconds: int) -> void:
             e.hash_vals = empty_hv
             let empty_sm: vector[string] = []
             e.set_members = empty_sm
+            let empty_zm: vector[string] = []
+            e.zset_members = empty_zm
+            let empty_zs: vector[string] = []
+            e.zset_scores = empty_zs
             return
         i = i + 1
 
@@ -149,6 +179,50 @@ fn store_append(s: RedisStore, key: string, val: string) -> int:
     else:
         store_set(s, key, val, -1)
         return len(val)
+
+fn store_setnx(s: RedisStore, key: string, val: string) -> int:
+    if store_exists(s, key) == 1:
+        return 0
+    store_set(s, key, val, -1)
+    return 1
+
+fn store_getset(s: RedisStore, key: string, val: string) -> string:
+    old := store_get(s, key)
+    store_set(s, key, val, -1)
+    return old
+
+fn store_getrange(s: RedisStore, key: string, start_i: int, stop_i: int) -> string:
+    val := store_get(s, key)
+    total := len(val)
+    if total == 0:
+        return ""
+    let mut st: int = start_i
+    if st < 0: st = total + st
+    if st < 0: st = 0
+    let mut sp: int = stop_i
+    if sp < 0: sp = total + sp
+    if sp >= total: sp = total - 1
+    if st > sp:
+        return ""
+    return substring(val, st, sp - st + 1)
+
+fn store_setrange(s: RedisStore, key: string, offset: int, val: string) -> int:
+    cur := store_get(s, key)
+    let mut out: string = ""
+    if offset > len(cur):
+        out = cur
+        let mut p: int = len(cur)
+        while p < offset:
+            out = out + " "
+            p = p + 1
+        out = out + val
+    else:
+        out = substring(cur, 0, offset) + val
+        rem_start := offset + len(val)
+        if rem_start < len(cur):
+            out = out + substring(cur, rem_start, len(cur) - rem_start)
+    store_set(s, key, out, -1)
+    return len(out)
 
 // ------------------------------------------------------------------------------
 // List Operations (LPUSH, RPUSH, LPOP, RPOP, LLEN, LRANGE, LINDEX)
@@ -236,16 +310,12 @@ fn store_lrange(s: RedisStore, key: string, start_i: int, stop_i: int) -> vector
         return res
 
     let mut st: int = start_i
-    if st < 0:
-        st = total + st
-    if st < 0:
-        st = 0
+    if st < 0: st = total + st
+    if st < 0: st = 0
 
     let mut sp: int = stop_i
-    if sp < 0:
-        sp = total + sp
-    if sp >= total:
-        sp = total - 1
+    if sp < 0: sp = total + sp
+    if sp >= total: sp = total - 1
 
     let mut k: int = st
     while k <= sp:
@@ -438,7 +508,244 @@ fn store_scard(s: RedisStore, key: string) -> int:
     return 0
 
 // ------------------------------------------------------------------------------
-// Key Metadata & Expiry (TYPE, EXPIRE, TTL, PERSIST, KEYS, FLUSHALL)
+// Sorted Set (ZSet) Operations (ZADD, ZRANGE, ZREVRANGE, ZSCORE, ZCARD, ZREM, ZRANK, ZINCRBY)
+// ------------------------------------------------------------------------------
+
+fn store_zadd(s: RedisStore, key: string, score: string, member: string) -> int:
+    sc := to_float(score)
+    idx := store_find_idx(s, key)
+    let mut e: RedisEntry = RedisEntry("", "", "", [], [], [], [], [], [], 0)
+    let mut is_new_entry: int = 0
+
+    if idx >= 0:
+        e = s.entries[idx]
+        e.val_type = "zset"
+    else:
+        e = entry_new_zset(key)
+        is_new_entry = 1
+
+    let mut is_new_member: int = 1
+    let mut clean_m: vector[string] = []
+    let mut clean_s: vector[string] = []
+
+    // Remove old instance if exists
+    let mut j: int = 0
+    while j < len(e.zset_members):
+        if e.zset_members[j] == member:
+            is_new_member = 0
+        else:
+            clean_m.push(e.zset_members[j])
+            clean_s.push(e.zset_scores[j])
+        j = j + 1
+
+    // Insert at sorted position
+    let mut new_m: vector[string] = []
+    let mut new_s: vector[string] = []
+    let mut inserted: int = 0
+    let mut k: int = 0
+    while k < len(clean_m):
+        item_sc := to_float(clean_s[k])
+        if inserted == 0 and sc < item_sc:
+            new_m.push(member)
+            new_s.push(score)
+            inserted = 1
+        new_m.push(clean_m[k])
+        new_s.push(clean_s[k])
+        k = k + 1
+
+    if inserted == 0:
+        new_m.push(member)
+        new_s.push(score)
+
+    e.zset_members = new_m
+    e.zset_scores = new_s
+
+    if is_new_entry == 1:
+        s.entries.push(e)
+
+    return is_new_member
+
+fn store_zrange(s: RedisStore, key: string, start_i: int, stop_i: int, with_scores: int) -> vector[string]:
+    let res: vector[string] = []
+    idx := store_find_idx(s, key)
+    if idx < 0:
+        return res
+    let e: RedisEntry = s.entries[idx]
+    total := len(e.zset_members)
+    if total == 0:
+        return res
+
+    let mut st: int = start_i
+    if st < 0: st = total + st
+    if st < 0: st = 0
+    let mut sp: int = stop_i
+    if sp < 0: sp = total + sp
+    if sp >= total: sp = total - 1
+
+    let mut k: int = st
+    while k <= sp:
+        res.push(e.zset_members[k])
+        if with_scores == 1:
+            res.push(e.zset_scores[k])
+        k = k + 1
+    return res
+
+fn store_zrevrange(s: RedisStore, key: string, start_i: int, stop_i: int, with_scores: int) -> vector[string]:
+    let res: vector[string] = []
+    idx := store_find_idx(s, key)
+    if idx < 0:
+        return res
+    let e: RedisEntry = s.entries[idx]
+    total := len(e.zset_members)
+    if total == 0:
+        return res
+
+    let mut st: int = start_i
+    if st < 0: st = total + st
+    if st < 0: st = 0
+    let mut sp: int = stop_i
+    if sp < 0: sp = total + sp
+    if sp >= total: sp = total - 1
+
+    let mut k: int = total - 1 - st
+    let min_k: int = total - 1 - sp
+    while k >= min_k and k >= 0:
+        res.push(e.zset_members[k])
+        if with_scores == 1:
+            res.push(e.zset_scores[k])
+        k = k - 1
+    return res
+
+fn store_zscore(s: RedisStore, key: string, member: string) -> string:
+    idx := store_find_idx(s, key)
+    if idx >= 0:
+        let e: RedisEntry = s.entries[idx]
+        let mut j: int = 0
+        while j < len(e.zset_members):
+            if e.zset_members[j] == member:
+                return e.zset_scores[j]
+            j = j + 1
+    return ""
+
+fn store_zcard(s: RedisStore, key: string) -> int:
+    idx := store_find_idx(s, key)
+    if idx >= 0:
+        let e: RedisEntry = s.entries[idx]
+        return len(e.zset_members)
+    return 0
+
+fn store_zrem(s: RedisStore, key: string, member: string) -> int:
+    idx := store_find_idx(s, key)
+    if idx >= 0:
+        let e: RedisEntry = s.entries[idx]
+        let mut j: int = 0
+        while j < len(e.zset_members):
+            if e.zset_members[j] == member:
+                let new_m: vector[string] = []
+                let new_s: vector[string] = []
+                let mut k: int = 0
+                while k < len(e.zset_members):
+                    if k != j:
+                        new_m.push(e.zset_members[k])
+                        new_s.push(e.zset_scores[k])
+                    k = k + 1
+                e.zset_members = new_m
+                e.zset_scores = new_s
+                return 1
+            j = j + 1
+    return 0
+
+fn store_zrank(s: RedisStore, key: string, member: string) -> int:
+    idx := store_find_idx(s, key)
+    if idx >= 0:
+        let e: RedisEntry = s.entries[idx]
+        let mut j: int = 0
+        while j < len(e.zset_members):
+            if e.zset_members[j] == member:
+                return j
+            j = j + 1
+    return -1
+
+fn store_zincrby(s: RedisStore, key: string, increment: string, member: string) -> string:
+    cur := store_zscore(s, key, member)
+    let mut base_sc: float = 0.0
+    if len(cur) > 0:
+        base_sc = to_float(cur)
+    new_sc := base_sc + to_float(increment)
+    new_str := str(new_sc)
+    store_zadd(s, key, new_str, member)
+    return new_str
+
+// ------------------------------------------------------------------------------
+// Pub/Sub Messaging Engine (SUBSCRIBE, PUBLISH, UNSUBSCRIBE)
+// ------------------------------------------------------------------------------
+
+fn store_subscribe(s: RedisStore, channel: string, client_fd: int) -> int:
+    let mut already: int = 0
+    let mut j: int = 0
+    while j < len(s.subs):
+        let sub: PubSubSubscription = s.subs[j]
+        if sub.channel == channel and sub.client_fd == client_fd:
+            already = 1
+            break
+        j = j + 1
+
+    if already == 0:
+        s.subs.push(PubSubSubscription(channel, client_fd))
+
+    let mut cnt: int = 0
+    let mut k: int = 0
+    while k < len(s.subs):
+        let sub2: PubSubSubscription = s.subs[k]
+        if sub2.client_fd == client_fd:
+            cnt = cnt + 1
+        k = k + 1
+    return cnt
+
+fn store_unsubscribe(s: RedisStore, channel: string, client_fd: int) -> int:
+    let new_subs: vector[PubSubSubscription] = []
+    let mut j: int = 0
+    while j < len(s.subs):
+        let sub: PubSubSubscription = s.subs[j]
+        if sub.channel != channel or sub.client_fd != client_fd:
+            new_subs.push(sub)
+        j = j + 1
+    s.subs = new_subs
+
+    let mut cnt: int = 0
+    let mut k: int = 0
+    while k < len(s.subs):
+        let sub2: PubSubSubscription = s.subs[k]
+        if sub2.client_fd == client_fd:
+            cnt = cnt + 1
+        k = k + 1
+    return cnt
+
+fn store_unsubscribe_all(s: RedisStore, client_fd: int) -> void:
+    let new_subs: vector[PubSubSubscription] = []
+    let mut j: int = 0
+    while j < len(s.subs):
+        let sub: PubSubSubscription = s.subs[j]
+        if sub.client_fd != client_fd:
+            new_subs.push(sub)
+        j = j + 1
+    s.subs = new_subs
+
+fn store_publish(s: RedisStore, channel: string, message: string) -> int:
+    let mut notified: int = 0
+    let payload: string = "*3\r\n$7\r\nmessage\r\n$" + str(len(channel)) + "\r\n" + channel + "\r\n$" + str(len(message)) + "\r\n" + message + "\r\n"
+
+    let mut j: int = 0
+    while j < len(s.subs):
+        let sub: PubSubSubscription = s.subs[j]
+        if sub.channel == channel:
+            tcp_write(sub.client_fd, payload)
+            notified = notified + 1
+        j = j + 1
+    return notified
+
+// ------------------------------------------------------------------------------
+// Key Metadata, Scanning & Expiry (TYPE, EXPIRE, TTL, PERSIST, KEYS, RENAME, SCAN)
 // ------------------------------------------------------------------------------
 
 fn store_type(s: RedisStore, key: string) -> string:
@@ -490,6 +797,30 @@ fn store_keys(s: RedisStore, pattern: string) -> vector[string]:
         i = i + 1
     return res
 
+fn store_rename(s: RedisStore, old_key: string, new_key: string) -> int:
+    idx := store_find_idx(s, old_key)
+    if idx < 0:
+        return 0
+    store_del(s, new_key)
+    idx2 := store_find_idx(s, old_key)
+    let e: RedisEntry = s.entries[idx2]
+    e.key = new_key
+    return 1
+
+fn store_renamenx(s: RedisStore, old_key: string, new_key: string) -> int:
+    if store_exists(s, old_key) == 0:
+        return -1
+    if store_exists(s, new_key) == 1:
+        return 0
+    store_rename(s, old_key, new_key)
+    return 1
+
+fn store_randomkey(s: RedisStore) -> string:
+    if len(s.entries) == 0:
+        return ""
+    let e: RedisEntry = s.entries[0]
+    return e.key
+
 fn store_flushall(s: RedisStore) -> void:
     let fresh: vector[RedisEntry] = []
     s.entries = fresh
@@ -517,7 +848,7 @@ fn store_advance_time(s: RedisStore, seconds: int) -> int:
 
 fn store_save_rdb(s: RedisStore, filepath: string) -> int:
     doc := clb_new()
-    clb_set_int(doc, "__rdb_version__", 2)
+    clb_set_int(doc, "__rdb_version__", 3)
     clb_set_int(doc, "__entry_count__", len(s.entries))
     
     let mut i: int = 0
@@ -548,6 +879,13 @@ fn store_save_rdb(s: RedisStore, filepath: string) -> int:
             while j < len(e.set_members):
                 clb_set_string(doc, pfx + "sm_" + str(j), e.set_members[j])
                 j = j + 1
+        elif e.val_type == "zset":
+            clb_set_int(doc, pfx + "z_cnt", len(e.zset_members))
+            let mut j: int = 0
+            while j < len(e.zset_members):
+                clb_set_string(doc, pfx + "zm_" + str(j), e.zset_members[j])
+                clb_set_string(doc, pfx + "zs_" + str(j), e.zset_scores[j])
+                j = j + 1
         i = i + 1
     return clb_save(filepath, doc)
 
@@ -570,6 +908,8 @@ fn store_load_rdb(s: RedisStore, filepath: string) -> int:
         let hash_k: vector[string] = []
         let hash_v: vector[string] = []
         let set_m: vector[string] = []
+        let zset_m: vector[string] = []
+        let zset_s: vector[string] = []
         
         if vtype == "list":
             l_cnt := clb_get_int(doc, pfx + "l_cnt", 0)
@@ -594,8 +934,17 @@ fn store_load_rdb(s: RedisStore, filepath: string) -> int:
                 sm := clb_get_string(doc, pfx + "sm_" + str(j), "")
                 set_m.push(sm)
                 j = j + 1
+        elif vtype == "zset":
+            z_cnt := clb_get_int(doc, pfx + "z_cnt", 0)
+            let mut j: int = 0
+            while j < z_cnt:
+                zm := clb_get_string(doc, pfx + "zm_" + str(j), "")
+                zs := clb_get_string(doc, pfx + "zs_" + str(j), "")
+                zset_m.push(zm)
+                zset_s.push(zs)
+                j = j + 1
                 
-        entry := RedisEntry(key, val, vtype, list_v, hash_k, hash_v, set_m, exp)
+        entry := RedisEntry(key, val, vtype, list_v, hash_k, hash_v, set_m, zset_m, zset_s, exp)
         s.entries.push(entry)
         i = i + 1
     return count

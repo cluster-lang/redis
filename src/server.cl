@@ -6,6 +6,15 @@
 import "src/resp.cl"
 import "src/store.cl"
 
+model ClientSession:
+    client_fd: int
+    in_multi: int
+    multi_queue: vector[string]
+
+fn session_new(fd: int) -> ClientSession:
+    let q: vector[string] = []
+    return ClientSession(fd, 0, q)
+
 fn str_to_upper(s: string) -> string:
     let mut out: string = ""
     let mut i: int = 0
@@ -56,12 +65,55 @@ fn server_info(s: RedisStore) -> string:
     info = info + "db0:keys=" + str(len(s.entries)) + ",expires=0,avg_ttl=0\r\n"
     return resp_encode_bulk(info)
 
-fn server_execute_args(s: RedisStore, args: vector[string]) -> string:
+fn server_execute_args_session(s: RedisStore, session: ClientSession, args: vector[string]) -> string:
     if len(args) == 0:
         return resp_encode_error("empty command")
 
     s.total_commands = s.total_commands + 1
     cmd := str_to_upper(args[0])
+
+    // --- TRANSACTIONS (MULTI, EXEC, DISCARD) ---
+    if cmd == "MULTI":
+        session.in_multi = 1
+        let fresh_q: vector[string] = []
+        session.multi_queue = fresh_q
+        return resp_encode_simple("OK")
+
+    if cmd == "DISCARD":
+        if session.in_multi == 0:
+            return resp_encode_error("DISCARD without MULTI")
+        session.in_multi = 0
+        let fresh_q: vector[string] = []
+        session.multi_queue = fresh_q
+        return resp_encode_simple("OK")
+
+    if cmd == "EXEC":
+        if session.in_multi == 0:
+            return resp_encode_error("EXEC without MULTI")
+        session.in_multi = 0
+        let mut out: string = "*" + str(len(session.multi_queue)) + "\r\n"
+        let mut qi: int = 0
+        while qi < len(session.multi_queue):
+            q_raw := session.multi_queue[qi]
+            q_args := resp_parse_command(q_raw)
+            q_res := server_execute_args_session(s, session, q_args)
+            out = out + q_res
+            qi = qi + 1
+        let fresh_q: vector[string] = []
+        session.multi_queue = fresh_q
+        return out
+
+    // If client is in MULTI transaction mode, queue this command!
+    if session.in_multi == 1:
+        if cmd != "QUIT":
+            // Reconstruct array for queue
+            let mut q_str: string = "*" + str(len(args)) + "\r\n"
+            let mut ai: int = 0
+            while ai < len(args):
+                q_str = q_str + resp_encode_bulk(args[ai])
+                ai = ai + 1
+            session.multi_queue.push(q_str)
+            return resp_encode_simple("QUEUED")
 
     // --- CONNECTION & DIAGNOSTICS ---
     if cmd == "PING":
@@ -104,6 +156,38 @@ fn server_execute_args(s: RedisStore, args: vector[string]) -> string:
         store_flushall(s)
         return resp_encode_simple("OK")
 
+    // --- PUB / SUB MESSAGING ---
+    if cmd == "SUBSCRIBE":
+        if len(args) < 2:
+            return resp_encode_error("wrong number of arguments for 'subscribe' command")
+        let mut out: string = ""
+        let mut j: int = 1
+        while j < len(args):
+            ch := args[j]
+            cnt := store_subscribe(s, ch, session.client_fd)
+            out = out + "*3\r\n$9\r\nsubscribe\r\n$" + str(len(ch)) + "\r\n" + ch + "\r\n:" + str(cnt) + "\r\n"
+            j = j + 1
+        return out
+
+    if cmd == "UNSUBSCRIBE":
+        if len(args) < 2:
+            store_unsubscribe_all(s, session.client_fd)
+            return "*3\r\n$11\r\nunsubscribe\r\n$-1\r\n:0\r\n"
+        let mut out: string = ""
+        let mut j: int = 1
+        while j < len(args):
+            ch := args[j]
+            cnt := store_unsubscribe(s, ch, session.client_fd)
+            out = out + "*3\r\n$11\r\nunsubscribe\r\n$" + str(len(ch)) + "\r\n" + ch + "\r\n:" + str(cnt) + "\r\n"
+            j = j + 1
+        return out
+
+    if cmd == "PUBLISH":
+        if len(args) < 3:
+            return resp_encode_error("wrong number of arguments for 'publish' command")
+        cnt := store_publish(s, args[1], args[2])
+        return resp_encode_int(cnt)
+
     // --- STRINGS ---
     if cmd == "SET":
         if len(args) < 3:
@@ -111,12 +195,32 @@ fn server_execute_args(s: RedisStore, args: vector[string]) -> string:
         key := args[1]
         val := args[2]
         let mut ttl: int = -1
-        if len(args) >= 5:
-            opt := str_to_upper(args[3])
-            if opt == "EX":
-                ttl = to_int(args[4])
+        let mut is_nx: int = 0
+        let mut is_xx: int = 0
+        let mut i: int = 3
+        while i < len(args):
+            opt := str_to_upper(args[i])
+            if opt == "EX" and i + 1 < len(args):
+                ttl = to_int(args[i + 1])
+                i = i + 1
+            elif opt == "NX":
+                is_nx = 1
+            elif opt == "XX":
+                is_xx = 1
+            i = i + 1
+
+        if is_nx == 1 and store_exists(s, key) == 1:
+            return resp_encode_null()
+        if is_xx == 1 and store_exists(s, key) == 0:
+            return resp_encode_null()
+
         store_set(s, key, val, ttl)
         return resp_encode_simple("OK")
+
+    if cmd == "SETNX":
+        if len(args) < 3:
+            return resp_encode_error("wrong number of arguments for 'setnx' command")
+        return resp_encode_int(store_setnx(s, args[1], args[2]))
 
     if cmd == "GET":
         if len(args) < 2:
@@ -126,6 +230,28 @@ fn server_execute_args(s: RedisStore, args: vector[string]) -> string:
             return resp_encode_null()
         return resp_encode_bulk(store_get(s, key))
 
+    if cmd == "GETSET":
+        if len(args) < 3:
+            return resp_encode_error("wrong number of arguments for 'getset' command")
+        key := args[1]
+        if store_exists(s, key) == 0:
+            store_set(s, key, args[2], -1)
+            return resp_encode_null()
+        old := store_getset(s, key, args[2])
+        return resp_encode_bulk(old)
+
+    if cmd == "GETRANGE":
+        if len(args) < 4:
+            return resp_encode_error("wrong number of arguments for 'getrange' command")
+        sub := store_getrange(s, args[1], to_int(args[2]), to_int(args[3]))
+        return resp_encode_bulk(sub)
+
+    if cmd == "SETRANGE":
+        if len(args) < 4:
+            return resp_encode_error("wrong number of arguments for 'setrange' command")
+        new_len := store_setrange(s, args[1], to_int(args[2]), args[3])
+        return resp_encode_int(new_len)
+
     if cmd == "MSET":
         if len(args) < 3:
             return resp_encode_error("wrong number of arguments for 'mset' command")
@@ -134,6 +260,20 @@ fn server_execute_args(s: RedisStore, args: vector[string]) -> string:
             store_set(s, args[i], args[i + 1], -1)
             i = i + 2
         return resp_encode_simple("OK")
+
+    if cmd == "MSETNX":
+        if len(args) < 3:
+            return resp_encode_error("wrong number of arguments for 'msetnx' command")
+        let mut chk: int = 1
+        while chk + 1 < len(args):
+            if store_exists(s, args[chk]) == 1:
+                return resp_encode_int(0)
+            chk = chk + 2
+        let mut set_i: int = 1
+        while set_i + 1 < len(args):
+            store_set(s, args[set_i], args[set_i + 1], -1)
+            set_i = set_i + 2
+        return resp_encode_int(1)
 
     if cmd == "MGET":
         if len(args) < 2:
@@ -179,7 +319,7 @@ fn server_execute_args(s: RedisStore, args: vector[string]) -> string:
             return resp_encode_error("wrong number of arguments for 'append' command")
         return resp_encode_int(store_append(s, args[1], args[2]))
 
-    // --- KEYS ---
+    // --- KEYS & SCAN ---
     if cmd == "DEL":
         if len(args) < 2:
             return resp_encode_error("wrong number of arguments for 'del' command")
@@ -210,6 +350,40 @@ fn server_execute_args(s: RedisStore, args: vector[string]) -> string:
         if len(args) > 1:
             pattern = args[1]
         return resp_encode_array(store_keys(s, pattern))
+
+    if cmd == "SCAN":
+        pattern := "*"
+        let mut i: int = 2
+        while i + 1 < len(args):
+            if str_to_upper(args[i]) == "MATCH":
+                pattern = args[i + 1]
+                i = i + 1
+            i = i + 1
+        k_list := store_keys(s, pattern)
+        let out_scan: string = "*2\r\n$1\r\n0\r\n" + resp_encode_array(k_list)
+        return out_scan
+
+    if cmd == "RANDOMKEY":
+        rand_k := store_randomkey(s)
+        if len(rand_k) == 0:
+            return resp_encode_null()
+        return resp_encode_bulk(rand_k)
+
+    if cmd == "RENAME":
+        if len(args) < 3:
+            return resp_encode_error("wrong number of arguments for 'rename' command")
+        ok := store_rename(s, args[1], args[2])
+        if ok == 1:
+            return resp_encode_simple("OK")
+        return resp_encode_error("no such key")
+
+    if cmd == "RENAMENX":
+        if len(args) < 3:
+            return resp_encode_error("wrong number of arguments for 'renamenx' command")
+        r_renx := store_renamenx(s, args[1], args[2])
+        if r_renx < 0:
+            return resp_encode_error("no such key")
+        return resp_encode_int(r_renx)
 
     if cmd == "EXPIRE":
         if len(args) < 3:
@@ -395,6 +569,76 @@ fn server_execute_args(s: RedisStore, args: vector[string]) -> string:
             return resp_encode_error("wrong number of arguments for 'scard' command")
         return resp_encode_int(store_scard(s, args[1]))
 
+    // --- SORTED SETS (ZSETS) ---
+    if cmd == "ZADD":
+        if len(args) < 4:
+            return resp_encode_error("wrong number of arguments for 'zadd' command")
+        let mut added: int = 0
+        let mut i: int = 2
+        while i + 1 < len(args):
+            score := args[i]
+            member := args[i + 1]
+            added = added + store_zadd(s, args[1], score, member)
+            i = i + 2
+        return resp_encode_int(added)
+
+    if cmd == "ZRANGE":
+        if len(args) < 4:
+            return resp_encode_error("wrong number of arguments for 'zrange' command")
+        let mut with_sc: int = 0
+        if len(args) >= 5:
+            if str_to_upper(args[4]) == "WITHSCORES":
+                with_sc = 1
+        let z_res: vector[string] = store_zrange(s, args[1], to_int(args[2]), to_int(args[3]), with_sc)
+        return resp_encode_array(z_res)
+
+    if cmd == "ZREVRANGE":
+        if len(args) < 4:
+            return resp_encode_error("wrong number of arguments for 'zrevrange' command")
+        let mut with_sc: int = 0
+        if len(args) >= 5:
+            if str_to_upper(args[4]) == "WITHSCORES":
+                with_sc = 1
+        let z_rev: vector[string] = store_zrevrange(s, args[1], to_int(args[2]), to_int(args[3]), with_sc)
+        return resp_encode_array(z_rev)
+
+    if cmd == "ZSCORE":
+        if len(args) < 3:
+            return resp_encode_error("wrong number of arguments for 'zscore' command")
+        sc := store_zscore(s, args[1], args[2])
+        if len(sc) == 0:
+            return resp_encode_null()
+        return resp_encode_bulk(sc)
+
+    if cmd == "ZCARD":
+        if len(args) < 2:
+            return resp_encode_error("wrong number of arguments for 'zcard' command")
+        return resp_encode_int(store_zcard(s, args[1]))
+
+    if cmd == "ZREM":
+        if len(args) < 3:
+            return resp_encode_error("wrong number of arguments for 'zrem' command")
+        let mut count: int = 0
+        let mut i: int = 2
+        while i < len(args):
+            count = count + store_zrem(s, args[1], args[i])
+            i = i + 1
+        return resp_encode_int(count)
+
+    if cmd == "ZRANK":
+        if len(args) < 3:
+            return resp_encode_error("wrong number of arguments for 'zrank' command")
+        rank_idx := store_zrank(s, args[1], args[2])
+        if rank_idx < 0:
+            return resp_encode_null()
+        return resp_encode_int(rank_idx)
+
+    if cmd == "ZINCRBY":
+        if len(args) < 4:
+            return resp_encode_error("wrong number of arguments for 'zincrby' command")
+        new_sc := store_zincrby(s, args[1], args[2], args[3])
+        return resp_encode_bulk(new_sc)
+
     // --- PERSISTENCE (.clb) ---
     if cmd == "SAVE":
         path := "dump.clb"
@@ -414,8 +658,8 @@ fn server_execute_args(s: RedisStore, args: vector[string]) -> string:
 
     return resp_encode_error("unknown command '" + args[0] + "'")
 
-// Processes all (potentially pipelined) commands in raw request buffer
-fn server_process_buffer(s: RedisStore, raw: string) -> string:
+// Buffer processor with session awareness
+fn server_process_buffer_session(s: RedisStore, session: ClientSession, raw: string) -> string:
     cursor := cursor_new(0)
     let mut out: string = ""
     while cursor.pos < len(raw):
@@ -423,12 +667,13 @@ fn server_process_buffer(s: RedisStore, raw: string) -> string:
         args := resp_parse_command_at(raw, cursor)
         if len(args) == 0:
             break
-        res := server_execute_args(s, args)
-        out = out + res
+        cmd_res := server_execute_args_session(s, session, args)
+        out = out + cmd_res
         if cursor.pos <= old_pos:
             cursor.pos = cursor.pos + 1
     return out
 
 // Single request entry point
 fn server_execute(s: RedisStore, raw_req: string) -> string:
-    return server_process_buffer(s, raw_req)
+    session := session_new(-1)
+    return server_process_buffer_session(s, session, raw_req)
