@@ -39,65 +39,72 @@ fn resp_encode_array(items: vector[string]) -> string:
 // Parses next command from raw stream buffer starting at cursor position
 fn resp_parse_command_at(raw: string, c: RespCursor) -> vector[string]:
     let args: vector[string] = []
+    raw_sz := len(raw)
     
     // Skip leading delimiters
-    while c.pos < len(raw):
-        ch := char_at(raw, c.pos)
-        if ch == "\r" or ch == "\n" or ch == " ":
+    while c.pos < raw_sz:
+        b := byte_at(raw, c.pos)
+        if b == 13 or b == 10 or b == 32:
             c.pos = c.pos + 1
         else:
             break
 
-    if c.pos >= len(raw):
+    if c.pos >= raw_sz:
         return args
 
     // RESP Array protocol (*<count>\r\n$<len>\r\n...)
-    if char_at(raw, c.pos) == "*":
+    if byte_at(raw, c.pos) == 42:
         c.pos = c.pos + 1
         let mut count_str: string = ""
-        while c.pos < len(raw):
-            ch := char_at(raw, c.pos)
+        while c.pos < raw_sz:
+            b := byte_at(raw, c.pos)
             c.pos = c.pos + 1
-            if ch == "\r" or ch == "\n":
-                if ch == "\r" and c.pos < len(raw) and char_at(raw, c.pos) == "\n":
-                    c.pos = c.pos + 1
+            if b == 13 or b == 10:
+                if b == 13:
+                    if c.pos < raw_sz:
+                        if byte_at(raw, c.pos) == 10:
+                            c.pos = c.pos + 1
                 break
-            count_str = count_str + ch
+            count_str = count_str + chr(b)
 
         num_args := to_int(count_str)
         let mut arg_idx: int = 0
-        while arg_idx < num_args and c.pos < len(raw):
+        while arg_idx < num_args and c.pos < raw_sz:
             // Skip any interstitial whitespace
-            while c.pos < len(raw):
-                w := char_at(raw, c.pos)
-                if w == "\r" or w == "\n" or w == " ":
+            while c.pos < raw_sz:
+                wb := byte_at(raw, c.pos)
+                if wb == 13 or wb == 10 or wb == 32:
                     c.pos = c.pos + 1
                 else:
                     break
-            if c.pos >= len(raw):
+            if c.pos >= raw_sz:
                 break
 
-            if char_at(raw, c.pos) == "$":
+            if byte_at(raw, c.pos) == 36:
                 c.pos = c.pos + 1
                 let mut len_str: string = ""
-                while c.pos < len(raw):
-                    bch := char_at(raw, c.pos)
+                while c.pos < raw_sz:
+                    bch := byte_at(raw, c.pos)
                     c.pos = c.pos + 1
-                    if bch == "\r" or bch == "\n":
-                        if bch == "\r" and c.pos < len(raw) and char_at(raw, c.pos) == "\n":
-                            c.pos = c.pos + 1
+                    if bch == 13 or bch == 10:
+                        if bch == 13:
+                            if c.pos < raw_sz:
+                                if byte_at(raw, c.pos) == 10:
+                                    c.pos = c.pos + 1
                         break
-                    len_str = len_str + bch
+                    len_str = len_str + chr(bch)
 
                 bulk_len := to_int(len_str)
                 if bulk_len >= 0:
                     arg_val := substring(raw, c.pos, bulk_len)
                     args.push(arg_val)
                     c.pos = c.pos + bulk_len
-                    if c.pos < len(raw) and char_at(raw, c.pos) == "\r":
-                        c.pos = c.pos + 1
-                    if c.pos < len(raw) and char_at(raw, c.pos) == "\n":
-                        c.pos = c.pos + 1
+                    if c.pos < raw_sz:
+                        if byte_at(raw, c.pos) == 13:
+                            c.pos = c.pos + 1
+                    if c.pos < raw_sz:
+                        if byte_at(raw, c.pos) == 10:
+                            c.pos = c.pos + 1
                 else:
                     args.push("")
             arg_idx = arg_idx + 1
@@ -105,22 +112,24 @@ fn resp_parse_command_at(raw: string, c: RespCursor) -> vector[string]:
 
     // Inline command format (e.g., "PING\r\n" or "SET foo bar\r\n")
     let mut cur: string = ""
-    while c.pos < len(raw):
-        ch := char_at(raw, c.pos)
+    while c.pos < raw_sz:
+        b := byte_at(raw, c.pos)
         c.pos = c.pos + 1
-        if ch == "\r" or ch == "\n":
-            if ch == "\r" and c.pos < len(raw) and char_at(raw, c.pos) == "\n":
-                c.pos = c.pos + 1
+        if b == 13 or b == 10:
+            if b == 13:
+                if c.pos < raw_sz:
+                    if byte_at(raw, c.pos) == 10:
+                        c.pos = c.pos + 1
             if len(cur) > 0:
                 args.push(cur)
                 cur = ""
             break
-        elif ch == " ":
+        elif b == 32:
             if len(cur) > 0:
                 args.push(cur)
                 cur = ""
         else:
-            cur = cur + ch
+            cur = cur + chr(b)
     if len(cur) > 0:
         args.push(cur)
     return args

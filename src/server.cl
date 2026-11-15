@@ -667,7 +667,9 @@ fn server_process_buffer_session(s: RedisStore, session: ClientSession, raw: str
         args := resp_parse_command_at(raw, cursor)
         if len(args) == 0:
             break
+        mutex_lock(s.lock)
         cmd_res := server_execute_args_session(s, session, args)
+        mutex_unlock(s.lock)
         out = out + cmd_res
         if cursor.pos <= old_pos:
             cursor.pos = cursor.pos + 1
