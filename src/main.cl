@@ -1,60 +1,77 @@
 // ==============================================================================
-// Cluster-Redis: Standalone Fast In-Memory Key-Value Server
+// Cluster-Redis: Standalone Fast In-Memory Key-Value Server Daemon
+// 100% Pure Cluster Language - Zero Foreign Dependencies
 // ==============================================================================
 
+import "std/net.cl"
 import "src/server.cl"
 
+fn handle_client(store: RedisStore, client_fd: int) -> int:
+    while 1:
+        req := tcp_read(client_fd, 65536)
+        if len(req) == 0:
+            break
+        resp := server_process_buffer(store, req)
+        if len(resp) > 0:
+            tcp_write(client_fd, resp)
+    tcp_close(client_fd)
+    return 0
+
+fn run_self_test(store: RedisStore) -> int:
+    println("Running in-process engine verification...")
+    r1 := server_execute(store, "SET test:key cluster-redis-ok")
+    assert(r1 == "+OK\r\n")
+    r2 := server_execute(store, "GET test:key")
+    assert(r2 == "$16\r\ncluster-redis-ok\r\n")
+    println("✓ In-memory engine and protocol verified!")
+    return 0
+
 fn main() -> int:
-    println("=================================================================")
-    println("          Cluster-Redis v1.0.0 (Pure Cluster Language)           ")
-    println("   Zero C-ABI Dependencies | RESP Protocol | .clb Persistence    ")
-    println("=================================================================")
-    
+    let mut port: int = 6379
+    let mut mode_test: int = 0
+
+    if len(sys_args) > 0:
+        arg0 := sys_args[0]
+        if arg0 == "--test" or arg0 == "test":
+            mode_test = 1
+        elif len(arg0) > 0 and char_at(arg0, 0) != "-":
+            p := to_int(arg0)
+            if p > 0:
+                port = p
+
     store := store_new()
-    
-    // Demonstrate basic commands
-    println("1. Testing Basic String Operations:")
-    r1 := server_execute(store, "SET server:name cluster-redis-node-1")
-    println("   SET server:name -> " + r1)
-    
-    r2 := server_execute(store, "GET server:name")
-    println("   GET server:name -> " + r2)
-    
-    // Demonstrate Atomic Counter
-    println("2. Testing Atomic Counters:")
-    server_execute(store, "SET page:views 100")
-    r3 := server_execute(store, "INCR page:views")
-    println("   INCR page:views -> " + r3)
-    r4 := server_execute(store, "INCRBY page:views 25")
-    println("   INCRBY page:views 25 -> " + r4)
-    
-    // Demonstrate Lists (Queue)
-    println("3. Testing List / Queue Operations:")
-    server_execute(store, "RPUSH task_queue job_alpha")
-    server_execute(store, "RPUSH task_queue job_beta")
-    server_execute(store, "RPUSH task_queue job_gamma")
-    r_list := server_execute(store, "LRANGE task_queue 0 -1")
-    println("   LRANGE task_queue 0 -1 -> \n" + r_list)
-    
-    r_pop := server_execute(store, "LPOP task_queue")
-    println("   LPOP task_queue -> " + r_pop)
-    
-    // Demonstrate Snapshot Persistence via .clb
-    snap_path := "/tmp/cluster_redis_dump.clb"
-    println("4. Saving snapshot to .clb binary bundle: " + snap_path)
-    server_execute(store, "SAVE " + snap_path)
-    
-    // Create new store and restore
-    new_store := store_new()
-    println("5. Starting new instance and restoring from snapshot...")
-    server_execute(new_store, "LOAD " + snap_path)
-    
-    r_restored := server_execute(new_store, "GET server:name")
-    println("   GET server:name on new instance -> " + r_restored)
-    assert(store_get(new_store, "server:name") == "cluster-redis-node-1")
-    assert(store_get(new_store, "page:views") == "126")
-    
-    println("=================================================================")
-    println("         CLUSTER-REDIS SERVER EXECUTED WITH 100% SUCCESS!        ")
-    println("=================================================================")
+
+    if mode_test == 1:
+        return run_self_test(store)
+
+    println("                _._                                                  ")
+    println("           _.-``__ ''-._                                             ")
+    println("      _.-``    `.  `_.  ''-._           Cluster-Redis 1.0.0 (64 bit) ")
+    println("  .-`` .-```.```\\/    _.,_ ''-._        Running in standalone mode   ")
+    println(" (    '      ,       .-`  | `,    )     Port: " + str(port) + "      ")
+    println(" |`-._`-...-` __...-.``-._|'` _.-'|     Zero C-ABI Dependencies      ")
+    println(" |    `-._   `._    /     _.-'    |     100% Pure Cluster Language   ")
+    println("  `-._    `-._  `-./  _.-'    _.-'                                   ")
+    println(" |`-._`-._    `-.__.-'    _.-'_.-'|     Ready to accept connections  ")
+    println(" |    `-._`-._        _.-'_.-'    |                                  ")
+    println("  `-._    `-._`-.__.-'_.-'    _.-'                                   ")
+    println("      `-._    `-.__.-'    _.-'                                       ")
+    println("          `-._        _.-'                                           ")
+    println("              `-.__.-'                                               ")
+    println("")
+
+    server_fd := tcp_listen(port)
+    if server_fd < 0:
+        println("[!] Fatal: Failed to bind to TCP port " + str(port))
+        return 1
+
+    println("[*] Cluster-Redis server listening on 0.0.0.0:" + str(port))
+    println("[*] Ready to accept Redis clients, redis-cli, and redis-benchmark.")
+
+    while 1:
+        client_fd := tcp_accept(server_fd)
+        if client_fd >= 0:
+            spawn handle_client(store, client_fd)
+
+    tcp_close(server_fd)
     return 0

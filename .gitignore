@@ -1,0 +1,7 @@
+bin/
+test_runner
+dump.clb
+*.clb
+*.out
+*.o
+.cl_cache/
