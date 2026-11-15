@@ -1,0 +1,12 @@
+[package]
+name = "cluster-redis"
+version = "1.0.0"
+authors = ["Alamgir ZK <zk@cluster-lang.org>"]
+edition = "2026"
+license = "MIT OR Apache-2.0"
+description = "Pure native in-memory key-value data store with Redis RESP protocol and .clb binary persistence."
+
+[build]
+entry = "src/main.cl"
+optimization = "O3"
+target = "native"
