@@ -1,20 +1,47 @@
 // ==============================================================================
-// Fast O(1) Hash Table (Dict) for Cluster-Redis
-// 100% Pure Cluster Language - Native zero-allocation DJB2 hashing
+// Module:      Fast O(1) Hash Table (dict.cl)
+// Project:     Cluster Redis (High-Performance In-Memory Key-Value Store)
+// Author:      Zaid Alamgir (ZK Company)
+// License:     MIT License
+// Description: High-speed O(1) closed-addressing hash table powered by DJB2 hashing
+//              and intrusive free-list recycling.
 // ==============================================================================
 
+// ------------------------------------------------------------------------------
+// Model:   DictNode
+// Purpose: Individual key-value index bucket chain node.
+// Fields:
+//   key:     String key name
+//   val_idx: Integer index of value payload in storage array
+//   next:    Index of next node in collision chain, or -1 for end
+//   active:  1 if node contains live data, 0 if in free list
+// ------------------------------------------------------------------------------
 model DictNode:
     key: string
     val_idx: int
     next: int
     active: int
 
+// ------------------------------------------------------------------------------
+// Model:   Dict
+// Purpose: Main hash table structure with dynamic buckets and intrusive free node recycling.
+// Fields:
+//   buckets:   Bucket array storing index of chain head (-1 for empty)
+//   nodes:     Contiguous allocation arena for all hash nodes
+//   free_head: Head index of free node recycle pool (-1 for none)
+//   count:     Total number of active keys stored in hash table
+// ------------------------------------------------------------------------------
 model Dict:
     buckets: vector[int]
     nodes: vector[DictNode]
     free_head: int
     count: int
 
+// ------------------------------------------------------------------------------
+// Function: dict_hash
+// Syntax:   fn dict_hash(s: string) -> int
+// Purpose:  Computes 32-bit positive DJB2 hash code for string key.
+// ------------------------------------------------------------------------------
 fn dict_hash(s: string) -> int:
     let mut h: int = 5381
     let mut i: int = 0
@@ -27,6 +54,11 @@ fn dict_hash(s: string) -> int:
         h = 0 - h
     return h
 
+// ------------------------------------------------------------------------------
+// Function: dict_new
+// Syntax:   fn dict_new(num_buckets: int) -> Dict
+// Purpose:  Initializes a new hash table with at least 16 buckets.
+// ------------------------------------------------------------------------------
 fn dict_new(num_buckets: int) -> Dict:
     let mut b: vector[int] = []
     let mut n: vector[DictNode] = []
@@ -39,6 +71,11 @@ fn dict_new(num_buckets: int) -> Dict:
         i = i + 1
     return Dict(b, n, -1, 0)
 
+// ------------------------------------------------------------------------------
+// Function: dict_get
+// Syntax:   fn dict_get(d: Dict, key: string) -> int
+// Purpose:  Looks up key in hash table. Returns value index or -1 if not found.
+// ------------------------------------------------------------------------------
 fn dict_get(d: Dict, key: string) -> int:
     sz := len(d.buckets)
     if sz == 0:
@@ -53,6 +90,11 @@ fn dict_get(d: Dict, key: string) -> int:
         cur = node.next
     return -1
 
+// ------------------------------------------------------------------------------
+// Function: dict_set
+// Syntax:   fn dict_set(d: Dict, key: string, val_idx: int) -> void
+// Purpose:  Inserts or updates key with value index, reusing recycled nodes when available.
+// ------------------------------------------------------------------------------
 fn dict_set(d: Dict, key: string, val_idx: int):
     sz := len(d.buckets)
     if sz == 0:
@@ -87,6 +129,11 @@ fn dict_set(d: Dict, key: string, val_idx: int):
     d.buckets[h] = node_idx
     d.count = d.count + 1
 
+// ------------------------------------------------------------------------------
+// Function: dict_del
+// Syntax:   fn dict_del(d: Dict, key: string) -> int
+// Purpose:  Removes key from hash table, linking node to free list. Returns 1 on success, 0 on absent.
+// ------------------------------------------------------------------------------
 fn dict_del(d: Dict, key: string) -> int:
     sz := len(d.buckets)
     if sz == 0:
@@ -118,5 +165,10 @@ fn dict_del(d: Dict, key: string) -> int:
         cur = node.next
     return 0
 
+// ------------------------------------------------------------------------------
+// Function: dict_size
+// Syntax:   fn dict_size(d: Dict) -> int
+// Purpose:  Returns total number of live keys in hash table.
+// ------------------------------------------------------------------------------
 fn dict_size(d: Dict) -> int:
     return d.count

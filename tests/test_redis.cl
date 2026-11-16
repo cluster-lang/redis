@@ -1,9 +1,20 @@
 // ==============================================================================
-// Unit Test Suite: Cluster-Redis In-Memory Engine & RESP Protocol (98% Suite)
+// Module:      Comprehensive Verification Test Suite (tests/test_redis.cl)
+// Project:     Cluster Redis (High-Performance In-Memory Key-Value Store)
+// Author:      Zaid Alamgir (ZK Company)
+// License:     MIT License
+// Description: Multi-phase verification test suite verifying Strings, Lists, Hashes,
+//              Sets, Sorted Sets (ZSets), Transactions (MULTI/EXEC), Pub/Sub, Key SCAN,
+//              and binary snapshot persistence.
 // ==============================================================================
 
 import "src/server.cl"
 
+// ------------------------------------------------------------------------------
+// Function: main
+// Syntax:   fn main() -> int
+// Purpose:  Runs all 11 verification suites ensuring 98% Redis command coverage.
+// ------------------------------------------------------------------------------
 fn main() -> int:
     println("--- Testing Cluster-Redis 98% Comprehensive Engine ---")
     store := store_new()

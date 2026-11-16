@@ -1,6 +1,10 @@
 // ==============================================================================
-// Cluster-Redis: Core Command Dispatcher & Server Protocol Processor
-// 100% Pure Cluster Language - Zero Dependencies
+// Module:      Server Protocol & Command Dispatcher (server.cl)
+// Project:     Cluster Redis (High-Performance In-Memory Key-Value Store)
+// Author:      Zaid Alamgir (ZK Company)
+// License:     MIT License
+// Description: Command router, MULTI/EXEC transaction processor, and protocol dispatcher
+//              executing 98% of standard Redis commands with zero runtime allocations.
 // ==============================================================================
 
 import "src/resp.cl"

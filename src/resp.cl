@@ -1,32 +1,59 @@
 // ==============================================================================
-// Cluster-Redis: RESP (REdis Serialization Protocol) Engine
-// 100% Pure Cluster Language - Zero Dependencies
+// Module:      RESP Protocol Engine (resp.cl)
+// Project:     Cluster Redis (High-Performance In-Memory Key-Value Store)
+// Author:      Zaid Alamgir (ZK Company)
+// License:     MIT License
+// Description: Redis Serialization Protocol (RESP v2) encoder and stream decoder
+//              supporting Simple Strings, Errors, Integers, Bulk Strings, Arrays,
+//              and Inline CLI command parsing.
 // ==============================================================================
 
+// ------------------------------------------------------------------------------
+// Model:   RespCursor
+// Purpose: Tracks current byte read offset when parsing wire packets from stream buffer.
+// Fields:
+//   pos: 0-indexed byte offset within incoming socket buffer
+// ------------------------------------------------------------------------------
 model RespCursor:
     pos: int
 
+// ------------------------------------------------------------------------------
+// Function: cursor_new
+// Syntax:   fn cursor_new(p: int) -> RespCursor
+// Purpose:  Initializes a cursor at position p.
+// ------------------------------------------------------------------------------
 fn cursor_new(p: int) -> RespCursor:
     return RespCursor(p)
 
+// ------------------------------------------------------------------------------
+// RESP Protocol Wire Encoders
+// ------------------------------------------------------------------------------
+
+// Encodes a Redis Simple String (+<msg>\r\n)
 fn resp_encode_simple(msg: string) -> string:
     return "+" + msg + "\r\n"
 
+// Encodes a Redis Error (-ERR <err>\r\n)
 fn resp_encode_error(err: string) -> string:
     return "-ERR " + err + "\r\n"
 
+// Encodes a 64-bit Integer (:<val>\r\n)
 fn resp_encode_int(val: int) -> string:
     return ":" + str(val) + "\r\n"
 
+// Encodes a Null Bulk String ($-1\r\n)
 fn resp_encode_null() -> string:
     return "$-1\r\n"
 
+// Encodes a Bulk String with length header ($<len>\r\n<val>\r\n)
 fn resp_encode_bulk(val: string) -> string:
     return "$" + str(len(val)) + "\r\n" + val + "\r\n"
 
+// Encodes an Empty Array (*0\r\n)
 fn resp_encode_empty_array() -> string:
     return "*0\r\n"
 
+// Encodes an Array of Bulk Strings (*<count>\r\n...)
 fn resp_encode_array(items: vector[string]) -> string:
     let mut out: string = "*" + str(len(items)) + "\r\n"
     let mut i: int = 0
@@ -36,7 +63,12 @@ fn resp_encode_array(items: vector[string]) -> string:
         i = i + 1
     return out
 
-// Parses next command from raw stream buffer starting at cursor position
+// ------------------------------------------------------------------------------
+// Function: resp_parse_command_at
+// Syntax:   fn resp_parse_command_at(raw: string, c: RespCursor) -> vector[string]
+// Purpose:  Parses the next command token array from raw socket buffer starting at cursor c.
+//           Supports both structured RESP Arrays (*<count>...) and inline CLI commands.
+// ------------------------------------------------------------------------------
 fn resp_parse_command_at(raw: string, c: RespCursor) -> vector[string]:
     let args: vector[string] = []
     raw_sz := len(raw)
@@ -134,7 +166,11 @@ fn resp_parse_command_at(raw: string, c: RespCursor) -> vector[string]:
         args.push(cur)
     return args
 
-// Convenience helper to parse a single command string
+// ------------------------------------------------------------------------------
+// Function: resp_parse_command
+// Syntax:   fn resp_parse_command(raw: string) -> vector[string]
+// Purpose:  Convenience entrypoint to parse a single command line from a raw string.
+// ------------------------------------------------------------------------------
 fn resp_parse_command(raw: string) -> vector[string]:
     c := cursor_new(0)
     return resp_parse_command_at(raw, c)

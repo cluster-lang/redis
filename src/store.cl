@@ -1,6 +1,10 @@
 // ==============================================================================
-// Cluster-Redis: High-Performance In-Memory Key-Value Store
-// 100% Pure Cluster Language - Zero Foreign Dependencies
+// Module:      In-Memory Storage Engine (store.cl)
+// Project:     Cluster Redis (High-Performance In-Memory Key-Value Store)
+// Author:      Zaid Alamgir (ZK Company)
+// License:     MIT License
+// Description: Multi-model in-memory database store supporting Strings, Lists, Hashes,
+//              Sets, Sorted Sets (ZSets), TTL expiration, Pub/Sub channels, and .clb snapshot persistence.
 // ==============================================================================
 
 import "src/dict.cl"

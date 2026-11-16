@@ -1,4 +1,5 @@
 bin/
+!bin/cluster-redis
 test_runner
 dump.clb
 *.clb
