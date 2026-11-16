@@ -1,8 +1,8 @@
 // ==============================================================================
 // Module:      Main Server Daemon CLI (main.cl)
 // Project:     Cluster Redis (High-Performance In-Memory Key-Value Store)
-// Author:      Zaid Alamgir (ZK Company)
-// License:     MIT License
+// Author:      mohammadzaid/(cluster) <zkalamgir@proton.me>
+// License:     Cluster Community // License:     MIT License Fair-Source License (CCFL-1.0)
 // Description: Standalone daemon entrypoint, socket listener, client connection
 //              coroutine spawner, and self-test verification.
 // ==============================================================================
@@ -67,7 +67,7 @@ fn main() -> int:
 
     println("==================================================================")
     println("              Cluster-Redis Server v1.0.0 (LLVM -O3)              ")
-    println("              Author: Zaid Alamgir (ZK Company)                   ")
+    println("              Author: mohammadzaid/(cluster) <zkalamgir@proton.me>                   ")
     println("==================================================================")
     println(" Port: " + str(port))
     println(" Standalone in-memory engine ready to accept connections.\n")

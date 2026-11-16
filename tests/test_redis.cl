@@ -1,8 +1,8 @@
 // ==============================================================================
 // Module:      Comprehensive Verification Test Suite (tests/test_redis.cl)
 // Project:     Cluster Redis (High-Performance In-Memory Key-Value Store)
-// Author:      Zaid Alamgir (ZK Company)
-// License:     MIT License
+// Author:      mohammadzaid/(cluster) <zkalamgir@proton.me>
+// License:     Cluster Community // License:     MIT License Fair-Source License (CCFL-1.0)
 // Description: Multi-phase verification test suite verifying Strings, Lists, Hashes,
 //              Sets, Sorted Sets (ZSets), Transactions (MULTI/EXEC), Pub/Sub, Key SCAN,
 //              and binary snapshot persistence.

@@ -1,9 +1,9 @@
 [package]
 name = "cluster-redis"
 version = "1.0.0"
-authors = ["Zaid Alamgir (ZK Company) <zaid@cluster-lang.org>"]
+authors = ["mohammadzaid/(cluster) <zkalamgir@proton.me>"]
 edition = "2026"
-license = "MIT"
+license = "CCFL-1.0 (MIT-Conditional)"
 description = "Pure native in-memory key-value data store with Redis RESP protocol and .clb binary persistence."
 
 [build]
