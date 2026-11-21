@@ -1,3 +1,12 @@
+# ==============================================================================
+# Cluster Redis: Git Ignore
+# ==============================================================================
+
+# Cache and IDE artifacts
+.cl_cache/
+.vscode/
+
+# Build and runtime data artifacts
 bin/
 !bin/cluster-redis
 test_runner
@@ -5,4 +14,6 @@ dump.clb
 *.clb
 *.out
 *.o
-.cl_cache/
+*.tmp
+*.log
+.DS_Store
