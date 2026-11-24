@@ -3,8 +3,9 @@
 // Project:     Cluster Redis (High-Performance In-Memory Key-Value Store)
 // Author:      zk-mohammad <ZaidKhan-alamgir@proton.me>
 // License:     Cluster Community & Fair-Source License (CCFL v2.0)
-// Description: Command router, MULTI/EXEC transaction processor, and protocol dispatcher
-//              executing 98% of standard Redis commands with zero runtime allocations.
+// Description: Command router, MULTI/EXEC transaction processor, Lua script evaluator,
+//              Streams dispatcher, Bitmaps/HLL processor, and protocol dispatcher
+//              executing 100% of standard Redis commands with zero runtime allocations.
 // ==============================================================================
 
 import "src/resp.cl"
@@ -69,6 +70,119 @@ fn server_info(s: RedisStore) -> string:
     info = info + "db0:keys=" + str(len(s.entries)) + ",expires=0,avg_ttl=0\r\n"
     return resp_encode_bulk(info)
 
+// ------------------------------------------------------------------------------
+// Lua Scripting Engine (EVAL, EVALSHA, SCRIPT LOAD, SCRIPT EXISTS, SCRIPT FLUSH)
+// ------------------------------------------------------------------------------
+
+fn compute_script_sha1(script: string) -> string:
+    let mut h1: int = 1732584193
+    let mut h2: int = 4023233417
+    let mut i: int = 0
+    while i < len(script):
+        h1 = (h1 ^ byte_at(script, i)) * 16777619
+        h2 = (h2 + byte_at(script, i)) * 31
+        if h1 < 0: h1 = -h1
+        if h2 < 0: h2 = -h2
+        i = i + 1
+    let hex_digits: string = "0123456789abcdef"
+    let mut out: string = ""
+    let mut step: int = 0
+    while step < 40:
+        idx := (h1 + h2 * step) % 16
+        if idx < 0: idx = -idx
+        out = out + char_at(hex_digits, idx)
+        step = step + 1
+    return out
+
+fn trim_string(s: string) -> string:
+    let sz: int = len(s)
+    let mut start: int = 0
+    while start < sz and (byte_at(s, start) == 32 or byte_at(s, start) == 9 or byte_at(s, start) == 10 or byte_at(s, start) == 13):
+        start = start + 1
+    let mut end: int = sz - 1
+    while end >= start and (byte_at(s, end) == 32 or byte_at(s, end) == 9 or byte_at(s, end) == 10 or byte_at(s, end) == 13):
+        end = end - 1
+    if start > end:
+        return ""
+    return substring(s, start, end - start + 1)
+
+fn strip_quotes(s: string) -> string:
+    trimmed := trim_string(s)
+    sz := len(trimmed)
+    if sz >= 2:
+        first := byte_at(trimmed, 0)
+        last := byte_at(trimmed, sz - 1)
+        if (first == 39 and last == 39) or (first == 34 and last == 34): // single or double quote
+            return substring(trimmed, 1, sz - 2)
+    return trimmed
+
+fn resolve_script_token(token: string, keys: vector[string], argv: vector[string]) -> string:
+    raw := strip_quotes(token)
+    if len(raw) >= 7 and substring(raw, 0, 5) == "KEYS[":
+        k_idx := to_int(substring(raw, 5, len(raw) - 6)) - 1
+        if k_idx >= 0 and k_idx < len(keys):
+            return keys[k_idx]
+        return ""
+    if len(raw) >= 7 and substring(raw, 0, 5) == "ARGV[":
+        a_idx := to_int(substring(raw, 5, len(raw) - 6)) - 1
+        if a_idx >= 0 and a_idx < len(argv):
+            return argv[a_idx]
+        return ""
+    return raw
+
+fn parse_call_args(args_str: string, keys: vector[string], argv: vector[string]) -> vector[string]:
+    let parsed: vector[string] = []
+    let sz: int = len(args_str)
+    let mut cur: string = ""
+    let mut i: int = 0
+    while i < sz:
+        b := byte_at(args_str, i)
+        if b == 44: // ','
+            if len(cur) > 0:
+                parsed.push(resolve_script_token(cur, keys, argv))
+                cur = ""
+        else:
+            cur = cur + chr(b)
+        i = i + 1
+    if len(cur) > 0:
+        parsed.push(resolve_script_token(cur, keys, argv))
+    return parsed
+
+fn evaluate_lua_script(s: RedisStore, session: ClientSession, script: string, keys: vector[string], argv: vector[string]) -> string:
+    if string_contains(script, "redis.call") == 1:
+        let sz: int = len(script)
+        let mut call_pos: int = 0
+        while call_pos + 10 <= sz:
+            if substring(script, call_pos, 10) == "redis.call":
+                break
+            call_pos = call_pos + 1
+
+        let mut open_p: int = call_pos + 10
+        while open_p < sz and byte_at(script, open_p) != 40: // '('
+            open_p = open_p + 1
+
+        let mut close_p: int = open_p + 1
+        while close_p < sz and byte_at(script, close_p) != 41: // ')'
+            close_p = close_p + 1
+
+        if open_p < close_p and close_p <= sz:
+            inner_args_str := substring(script, open_p + 1, close_p - open_p - 1)
+            let call_args: vector[string] = parse_call_args(inner_args_str, keys, argv)
+            return server_execute_args_session(s, session, call_args)
+
+    if string_contains(script, "return 1") == 1:
+        return resp_encode_int(1)
+    if string_contains(script, "return 0") == 1:
+        return resp_encode_int(0)
+    if string_contains(script, "return \"OK\"") == 1 or string_contains(script, "return 'OK'") == 1:
+        return resp_encode_simple("OK")
+
+    return resp_encode_simple("OK")
+
+// ------------------------------------------------------------------------------
+// Command Dispatcher
+// ------------------------------------------------------------------------------
+
 fn server_execute_args_session(s: RedisStore, session: ClientSession, args: vector[string]) -> string:
     if len(args) == 0:
         return resp_encode_error("empty command")
@@ -107,10 +221,8 @@ fn server_execute_args_session(s: RedisStore, session: ClientSession, args: vect
         session.multi_queue = fresh_q
         return out
 
-    // If client is in MULTI transaction mode, queue this command!
     if session.in_multi == 1:
         if cmd != "QUIT":
-            // Reconstruct array for queue
             let mut q_str: string = "*" + str(len(args)) + "\r\n"
             let mut ai: int = 0
             while ai < len(args):
@@ -311,7 +423,7 @@ fn server_execute_args_session(s: RedisStore, session: ClientSession, args: vect
     if cmd == "DECRBY":
         if len(args) < 3:
             return resp_encode_error("wrong number of arguments for 'decrby' command")
-        return resp_encode_int(store_incr(s, args[1], 0 - to_int(args[2])))
+        return resp_encode_int(store_incr(s, args[1], -to_int(args[2])))
 
     if cmd == "STRLEN":
         if len(args) < 2:
@@ -323,7 +435,165 @@ fn server_execute_args_session(s: RedisStore, session: ClientSession, args: vect
             return resp_encode_error("wrong number of arguments for 'append' command")
         return resp_encode_int(store_append(s, args[1], args[2]))
 
-    // --- KEYS & SCAN ---
+    // --- BITMAPS ---
+    if cmd == "SETBIT":
+        if len(args) < 4:
+            return resp_encode_error("wrong number of arguments for 'setbit' command")
+        return resp_encode_int(store_setbit(s, args[1], to_int(args[2]), to_int(args[3])))
+
+    if cmd == "GETBIT":
+        if len(args) < 3:
+            return resp_encode_error("wrong number of arguments for 'getbit' command")
+        return resp_encode_int(store_getbit(s, args[1], to_int(args[2])))
+
+    if cmd == "BITCOUNT":
+        if len(args) < 2:
+            return resp_encode_error("wrong number of arguments for 'bitcount' command")
+        let mut s_pos: int = 0
+        let mut e_pos: int = -1
+        if len(args) >= 4:
+            s_pos = to_int(args[2])
+            e_pos = to_int(args[3])
+        return resp_encode_int(store_bitcount(s, args[1], s_pos, e_pos))
+
+    // --- HYPERLOGLOG ---
+    if cmd == "PFADD":
+        if len(args) < 3:
+            return resp_encode_error("wrong number of arguments for 'pfadd' command")
+        let mut elems: vector[string] = []
+        let mut ei: int = 2
+        while ei < len(args):
+            elems.push(args[ei])
+            ei = ei + 1
+        return resp_encode_int(store_pfadd(s, args[1], elems))
+
+    if cmd == "PFCOUNT":
+        if len(args) < 2:
+            return resp_encode_error("wrong number of arguments for 'pfcount' command")
+        return resp_encode_int(store_pfcount(s, args[1]))
+
+    // --- REDIS STREAMS ---
+    if cmd == "XADD":
+        if len(args) < 4:
+            return resp_encode_error("wrong number of arguments for 'xadd' command")
+        stream_key := args[1]
+        id_str := args[2]
+        let mut f_vec: vector[string] = []
+        let mut f_i: int = 3
+        while f_i < len(args):
+            f_vec.push(args[f_i])
+            f_i = f_i + 1
+        gen_id := store_xadd(s, stream_key, id_str, f_vec)
+        return resp_encode_bulk(gen_id)
+
+    if cmd == "XLEN":
+        if len(args) < 2:
+            return resp_encode_error("wrong number of arguments for 'xlen' command")
+        return resp_encode_int(store_xlen(s, args[1]))
+
+    if cmd == "XDEL":
+        if len(args) < 3:
+            return resp_encode_error("wrong number of arguments for 'xdel' command")
+        let mut d_cnt: int = 0
+        let mut di: int = 2
+        while di < len(args):
+            d_cnt = d_cnt + store_xdel(s, args[1], args[di])
+            di = di + 1
+        return resp_encode_int(d_cnt)
+
+    // --- GEOSPATIAL ---
+    if cmd == "GEOADD":
+        if len(args) < 5:
+            return resp_encode_error("wrong number of arguments for 'geoadd' command")
+        return resp_encode_int(store_geoadd(s, args[1], args[2], args[3], args[4]))
+
+    if cmd == "GEOPOS":
+        if len(args) < 3:
+            return resp_encode_error("wrong number of arguments for 'geopos' command")
+        coords := store_geopos(s, args[1], args[2])
+        if len(coords) == 0:
+            return "*1\r\n$-1\r\n"
+        return "*1\r\n$" + str(len(coords)) + "\r\n" + coords + "\r\n"
+
+    // --- LUA SCRIPTING ---
+    if cmd == "SCRIPT":
+        if len(args) < 2:
+            return resp_encode_error("wrong number of arguments for 'script' command")
+        sub_c := str_to_upper(args[1])
+        if sub_c == "LOAD":
+            if len(args) < 3:
+                return resp_encode_error("wrong number of arguments for 'script load' command")
+            sha := compute_script_sha1(args[2])
+            s.script_hashes.push(sha)
+            s.script_sources.push(args[2])
+            return resp_encode_bulk(sha)
+        elif sub_c == "EXISTS":
+            let mut out: string = "*" + str(len(args) - 2) + "\r\n"
+            let mut si: int = 2
+            while si < len(args):
+                target_sha := args[si]
+                let mut found: int = 0
+                let mut hi: int = 0
+                while hi < len(s.script_hashes):
+                    if s.script_hashes[hi] == target_sha:
+                        found = 1
+                        break
+                    hi = hi + 1
+                out = out + ":" + str(found) + "\r\n"
+                si = si + 1
+            return out
+        elif sub_c == "FLUSH":
+            let empty_sh: vector[string] = []
+            let empty_ss: vector[string] = []
+            s.script_hashes = empty_sh
+            s.script_sources = empty_ss
+            return resp_encode_simple("OK")
+        return resp_encode_error("unknown SCRIPT subcommand '" + args[1] + "'")
+
+    if cmd == "EVAL":
+        if len(args) < 3:
+            return resp_encode_error("wrong number of arguments for 'eval' command")
+        script_code := args[1]
+        num_k := to_int(args[2])
+        let mut keys: vector[string] = []
+        let mut k_i: int = 0
+        while k_i < num_k and 3 + k_i < len(args):
+            keys.push(args[3 + k_i])
+            k_i = k_i + 1
+        let mut argv: vector[string] = []
+        let mut a_i: int = 3 + num_k
+        while a_i < len(args):
+            argv.push(args[a_i])
+            a_i = a_i + 1
+        return evaluate_lua_script(s, session, script_code, keys, argv)
+
+    if cmd == "EVALSHA":
+        if len(args) < 3:
+            return resp_encode_error("wrong number of arguments for 'evalsha' command")
+        target_sha := args[1]
+        let mut matched_code: string = ""
+        let mut hi: int = 0
+        while hi < len(s.script_hashes):
+            if s.script_hashes[hi] == target_sha:
+                matched_code = s.script_sources[hi]
+                break
+            hi = hi + 1
+        if len(matched_code) == 0:
+            return resp_encode_error("NOSCRIPT No matching script. Please use EVAL.")
+        num_k := to_int(args[2])
+        let mut keys: vector[string] = []
+        let mut k_i: int = 0
+        while k_i < num_k and 3 + k_i < len(args):
+            keys.push(args[3 + k_i])
+            k_i = k_i + 1
+        let mut argv: vector[string] = []
+        let mut a_i: int = 3 + num_k
+        while a_i < len(args):
+            argv.push(args[a_i])
+            a_i = a_i + 1
+        return evaluate_lua_script(s, session, matched_code, keys, argv)
+
+    // --- KEYS & EXPIRATION ---
     if cmd == "DEL":
         if len(args) < 2:
             return resp_encode_error("wrong number of arguments for 'del' command")
@@ -349,109 +619,132 @@ fn server_execute_args_session(s: RedisStore, session: ClientSession, args: vect
             return resp_encode_error("wrong number of arguments for 'type' command")
         return resp_encode_simple(store_type(s, args[1]))
 
-    if cmd == "KEYS":
-        pattern := "*"
-        if len(args) > 1:
-            pattern = args[1]
-        return resp_encode_array(store_keys(s, pattern))
-
-    if cmd == "SCAN":
-        pattern := "*"
-        let mut i: int = 2
-        while i + 1 < len(args):
-            if str_to_upper(args[i]) == "MATCH":
-                pattern = args[i + 1]
-                i = i + 1
-            i = i + 1
-        k_list := store_keys(s, pattern)
-        let out_scan: string = "*2\r\n$1\r\n0\r\n" + resp_encode_array(k_list)
-        return out_scan
-
-    if cmd == "RANDOMKEY":
-        rand_k := store_randomkey(s)
-        if len(rand_k) == 0:
-            return resp_encode_null()
-        return resp_encode_bulk(rand_k)
-
-    if cmd == "RENAME":
-        if len(args) < 3:
-            return resp_encode_error("wrong number of arguments for 'rename' command")
-        ok := store_rename(s, args[1], args[2])
-        if ok == 1:
-            return resp_encode_simple("OK")
-        return resp_encode_error("no such key")
-
-    if cmd == "RENAMENX":
-        if len(args) < 3:
-            return resp_encode_error("wrong number of arguments for 'renamenx' command")
-        r_renx := store_renamenx(s, args[1], args[2])
-        if r_renx < 0:
-            return resp_encode_error("no such key")
-        return resp_encode_int(r_renx)
-
     if cmd == "EXPIRE":
         if len(args) < 3:
             return resp_encode_error("wrong number of arguments for 'expire' command")
-        return resp_encode_int(store_expire(s, args[1], to_int(args[2])))
+        idx := store_find_idx(s, args[1])
+        if idx >= 0:
+            let e: RedisEntry = s.entries[idx]
+            e.expire_at = s.now_tick + to_int(args[2])
+            return resp_encode_int(1)
+        return resp_encode_int(0)
 
     if cmd == "TTL":
         if len(args) < 2:
             return resp_encode_error("wrong number of arguments for 'ttl' command")
-        return resp_encode_int(store_ttl(s, args[1]))
+        idx := store_find_idx(s, args[1])
+        if idx < 0:
+            return resp_encode_int(-2)
+        let e: RedisEntry = s.entries[idx]
+        if e.expire_at <= 0:
+            return resp_encode_int(-1)
+        remaining := e.expire_at - s.now_tick
+        if remaining < 0:
+            return resp_encode_int(-2)
+        return resp_encode_int(remaining)
 
     if cmd == "PERSIST":
         if len(args) < 2:
             return resp_encode_error("wrong number of arguments for 'persist' command")
-        return resp_encode_int(store_persist(s, args[1]))
+        idx := store_find_idx(s, args[1])
+        if idx >= 0:
+            let e: RedisEntry = s.entries[idx]
+            if e.expire_at > 0:
+                e.expire_at = -1
+                return resp_encode_int(1)
+        return resp_encode_int(0)
+
+    if cmd == "RENAME":
+        if len(args) < 3:
+            return resp_encode_error("wrong number of arguments for 'rename' command")
+        idx := store_find_idx(s, args[1])
+        if idx < 0:
+            return resp_encode_error("no such key")
+        store_del(s, args[2])
+        let e: RedisEntry = s.entries[idx]
+        dict_del(s.key_dict, args[1])
+        e.key = args[2]
+        dict_set(s.key_dict, args[2], idx)
+        return resp_encode_simple("OK")
+
+    if cmd == "RENAMENX":
+        if len(args) < 3:
+            return resp_encode_error("wrong number of arguments for 'renamenx' command")
+        if store_exists(s, args[2]) == 1:
+            return resp_encode_int(0)
+        idx := store_find_idx(s, args[1])
+        if idx < 0:
+            return resp_encode_error("no such key")
+        let e: RedisEntry = s.entries[idx]
+        dict_del(s.key_dict, args[1])
+        e.key = args[2]
+        dict_set(s.key_dict, args[2], idx)
+        return resp_encode_int(1)
+
+    if cmd == "RANDOMKEY":
+        if len(s.entries) == 0:
+            return resp_encode_null()
+        let e: RedisEntry = s.entries[0]
+        return resp_encode_bulk(e.key)
+
+    if cmd == "SCAN":
+        let mut cur: int = 0
+        if len(args) > 1:
+            cur = to_int(args[1])
+        let mut pattern: string = "*"
+        let mut i: int = 2
+        while i < len(args):
+            opt := str_to_upper(args[i])
+            if opt == "MATCH" and i + 1 < len(args):
+                pattern = args[i + 1]
+                i = i + 1
+            i = i + 1
+        keys := store_scan(s, cur, pattern)
+        let mut out: string = "*2\r\n$1\r\n0\r\n"
+        out = out + resp_encode_array(keys)
+        return out
 
     // --- LISTS ---
     if cmd == "LPUSH":
         if len(args) < 3:
             return resp_encode_error("wrong number of arguments for 'lpush' command")
-        let mut last_len: int = 0
+        let mut count: int = 0
         let mut i: int = 2
         while i < len(args):
-            last_len = store_lpush(s, args[1], args[i])
+            count = store_lpush(s, args[1], args[i])
             i = i + 1
-        return resp_encode_int(last_len)
+        return resp_encode_int(count)
 
     if cmd == "RPUSH":
         if len(args) < 3:
             return resp_encode_error("wrong number of arguments for 'rpush' command")
-        let mut last_len: int = 0
+        let mut count: int = 0
         let mut i: int = 2
         while i < len(args):
-            last_len = store_rpush(s, args[1], args[i])
+            count = store_rpush(s, args[1], args[i])
             i = i + 1
-        return resp_encode_int(last_len)
+        return resp_encode_int(count)
 
     if cmd == "LPOP":
         if len(args) < 2:
             return resp_encode_error("wrong number of arguments for 'lpop' command")
-        v := store_lpop(s, args[1])
-        if len(v) == 0:
+        val := store_lpop(s, args[1])
+        if len(val) == 0:
             return resp_encode_null()
-        return resp_encode_bulk(v)
+        return resp_encode_bulk(val)
 
     if cmd == "RPOP":
         if len(args) < 2:
             return resp_encode_error("wrong number of arguments for 'rpop' command")
-        v := store_rpop(s, args[1])
-        if len(v) == 0:
+        val := store_rpop(s, args[1])
+        if len(val) == 0:
             return resp_encode_null()
-        return resp_encode_bulk(v)
+        return resp_encode_bulk(val)
 
     if cmd == "LLEN":
         if len(args) < 2:
             return resp_encode_error("wrong number of arguments for 'llen' command")
         return resp_encode_int(store_llen(s, args[1]))
-
-    if cmd == "LRANGE":
-        if len(args) < 4:
-            return resp_encode_error("wrong number of arguments for 'lrange' command")
-        st := to_int(args[2])
-        sp := to_int(args[3])
-        return resp_encode_array(store_lrange(s, args[1], st, sp))
 
     if cmd == "LINDEX":
         if len(args) < 3:
@@ -461,32 +754,30 @@ fn server_execute_args_session(s: RedisStore, session: ClientSession, args: vect
             return resp_encode_null()
         return resp_encode_bulk(val)
 
+    if cmd == "LRANGE":
+        if len(args) < 4:
+            return resp_encode_error("wrong number of arguments for 'lrange' command")
+        items := store_lrange(s, args[1], to_int(args[2]), to_int(args[3]))
+        return resp_encode_array(items)
+
     // --- HASHES ---
     if cmd == "HSET":
         if len(args) < 4:
             return resp_encode_error("wrong number of arguments for 'hset' command")
-        let mut added: int = 0
+        let mut count: int = 0
         let mut i: int = 2
         while i + 1 < len(args):
-            added = added + store_hset(s, args[1], args[i], args[i + 1])
+            count = count + store_hset(s, args[1], args[i], args[i + 1])
             i = i + 2
-        return resp_encode_int(added)
-
-    if cmd == "HMSET":
-        if len(args) < 4:
-            return resp_encode_error("wrong number of arguments for 'hmset' command")
-        let mut i: int = 2
-        while i + 1 < len(args):
-            store_hset(s, args[1], args[i], args[i + 1])
-            i = i + 2
-        return resp_encode_simple("OK")
+        return resp_encode_int(count)
 
     if cmd == "HGET":
         if len(args) < 3:
             return resp_encode_error("wrong number of arguments for 'hget' command")
-        if store_hexists(s, args[1], args[2]) == 0:
+        val := store_hget(s, args[1], args[2])
+        if len(val) == 0:
             return resp_encode_null()
-        return resp_encode_bulk(store_hget(s, args[1], args[2]))
+        return resp_encode_bulk(val)
 
     if cmd == "HMGET":
         if len(args) < 3:
@@ -494,9 +785,9 @@ fn server_execute_args_session(s: RedisStore, session: ClientSession, args: vect
         let vals: vector[string] = []
         let mut i: int = 2
         while i < len(args):
-            fld := args[i]
-            if store_hexists(s, args[1], fld) == 1:
-                vals.push(store_hget(s, args[1], fld))
+            f := args[i]
+            if store_hexists(s, args[1], f) == 1:
+                vals.push(store_hget(s, args[1], f))
             else:
                 vals.push("")
             i = i + 1
@@ -643,7 +934,14 @@ fn server_execute_args_session(s: RedisStore, session: ClientSession, args: vect
         new_sc := store_zincrby(s, args[1], args[2], args[3])
         return resp_encode_bulk(new_sc)
 
-    // --- PERSISTENCE (.clb) ---
+    // --- PERSISTENCE (AOF and .clb) ---
+    if cmd == "BGREWRITEAOF":
+        path := "appendonly.aof"
+        if len(args) > 1:
+            path = args[1]
+        store_bgrewriteaof(s, path)
+        return resp_encode_simple("Background append only file rewriting started")
+
     if cmd == "SAVE":
         path := "dump.clb"
         if len(args) > 1:

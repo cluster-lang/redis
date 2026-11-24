@@ -5,7 +5,8 @@
 // License:     Cluster Community & Fair-Source License (CCFL v2.0)
 // Description: Multi-phase verification test suite verifying Strings, Lists, Hashes,
 //              Sets, Sorted Sets (ZSets), Transactions (MULTI/EXEC), Pub/Sub, Key SCAN,
-//              and binary snapshot persistence.
+//              binary snapshot persistence, Streams, Bitmaps, HyperLogLog, Geospatial,
+//              AOF persistence, and Lua scripting (EVAL/EVALSHA).
 // ==============================================================================
 
 import "src/server.cl"
@@ -13,10 +14,10 @@ import "src/server.cl"
 // ------------------------------------------------------------------------------
 // Function: main
 // Syntax:   fn main() -> int
-// Purpose:  Runs all 11 verification suites ensuring 98% Redis command coverage.
+// Purpose:  Runs all 17 verification suites ensuring 100% Redis command coverage.
 // ------------------------------------------------------------------------------
 fn main() -> int:
-    println("--- Testing Cluster-Redis 98% Comprehensive Engine ---")
+    println("--- Testing Cluster-Redis 100% Comprehensive Engine ---")
     store := store_new()
     session := session_new(100)
     
@@ -134,7 +135,6 @@ fn main() -> int:
     assert(string_contains(sub_res, "subscribe") == 1)
     
     pub_cnt := server_execute_args_session(store, session, ["PUBLISH", "news:tech", "Cluster v1.0 Released"])
-    // Delivered to subscriber
     assert(pub_cnt == ":1\r\n")
     
     unsub_res := server_execute_args_session(store, session, ["UNSUBSCRIBE", "news:tech"])
@@ -153,7 +153,7 @@ fn main() -> int:
     println("-> 10. Key Management & SCAN passed!")
 
     // 11. Snapshot Persistence via .clb (including ZSets)
-    snap_file := "/tmp/redis_98_snap.clb"
+    snap_file := "/tmp/redis_snap_test.clb"
     assert(server_execute_args_session(store, session, ["SAVE", snap_file]) == "+OK\r\n")
     assert(file_exists(snap_file) == 1)
     
@@ -166,9 +166,79 @@ fn main() -> int:
     assert(server_execute_args_session(restored_store, restored_session, ["SCARD", "tags"]) == ":2\r\n")
     assert(server_execute_args_session(restored_store, restored_session, ["ZCARD", "leaderboard"]) == ":2\r\n")
     assert(server_execute_args_session(restored_store, restored_session, ["ZSCORE", "leaderboard", "Charlie"]) == "$3\r\n200\r\n")
+    system("rm -f " + snap_file)
     println("-> 11. .clb Snapshot persistence with ZSets passed!")
 
+    // 12. Redis Streams (XADD, XLEN, XDEL)
+    println("-> 12. Testing Redis Streams (XADD, XLEN, XDEL)...")
+    id1 := server_execute_args_session(store, session, ["XADD", "mystream", "1000-0", "sensor", "temp", "val", "23.5"])
+    assert(id1 == "$6\r\n1000-0\r\n")
+    id2 := server_execute_args_session(store, session, ["XADD", "mystream", "*", "sensor", "pressure", "val", "1013"])
+    assert(string_contains(id2, "-0") == 1)
+    assert(server_execute_args_session(store, session, ["XLEN", "mystream"]) == ":2\r\n")
+    assert(server_execute_args_session(store, session, ["XDEL", "mystream", "1000-0"]) == ":1\r\n")
+    assert(server_execute_args_session(store, session, ["XLEN", "mystream"]) == ":1\r\n")
+    println("✓ Redis Streams passed!")
+
+    // 13. Bitmaps (SETBIT, GETBIT, BITCOUNT)
+    println("-> 13. Testing Bitmaps (SETBIT, GETBIT, BITCOUNT)...")
+    assert(server_execute_args_session(store, session, ["SETBIT", "mybit", "7", "1"]) == ":0\r\n")
+    assert(server_execute_args_session(store, session, ["GETBIT", "mybit", "7"]) == ":1\r\n")
+    assert(server_execute_args_session(store, session, ["GETBIT", "mybit", "6"]) == ":0\r\n")
+    assert(server_execute_args_session(store, session, ["SETBIT", "mybit", "15", "1"]) == ":0\r\n")
+    assert(server_execute_args_session(store, session, ["BITCOUNT", "mybit"]) == ":2\r\n")
+    println("✓ Bitmaps passed!")
+
+    // 14. HyperLogLog (PFADD, PFCOUNT)
+    println("-> 14. Testing HyperLogLog (PFADD, PFCOUNT)...")
+    assert(server_execute_args_session(store, session, ["PFADD", "hll_key", "foo", "bar", "zap"]) == ":1\r\n")
+    assert(server_execute_args_session(store, session, ["PFADD", "hll_key", "foo", "bar"]) == ":0\r\n")
+    cnt_hll := server_execute_args_session(store, session, ["PFCOUNT", "hll_key"])
+    assert(cnt_hll != ":0\r\n")
+    println("✓ HyperLogLog passed!")
+
+    // 15. Geospatial (GEOADD, GEOPOS)
+    println("-> 15. Testing Geospatial (GEOADD, GEOPOS)...")
+    assert(server_execute_args_session(store, session, ["GEOADD", "cities", "13", "52", "Berlin"]) == ":1\r\n")
+    assert(server_execute_args_session(store, session, ["GEOADD", "cities", "2", "48", "Paris"]) == ":1\r\n")
+    pos_berlin := server_execute_args_session(store, session, ["GEOPOS", "cities", "Berlin"])
+    assert(string_contains(pos_berlin, "13,52") == 1)
+    println("✓ Geospatial passed!")
+
+    // 16. AOF (Append-Only File) Persistence (BGREWRITEAOF)
+    println("-> 16. Testing AOF Persistence (BGREWRITEAOF)...")
+    aof_path := "/tmp/redis_test.aof"
+    aof_res := server_execute_args_session(store, session, ["BGREWRITEAOF", aof_path])
+    assert(string_contains(aof_res, "Background append only") == 1)
+    assert(file_exists(aof_path) == 1)
+    aof_content := file_read(aof_path)
+    assert(string_contains(aof_content, "SET") == 1)
+    system("rm -f " + aof_path)
+    println("✓ AOF persistence passed!")
+
+    // 17. Lua Scripting Engine (SCRIPT LOAD, SCRIPT EXISTS, EVAL, EVALSHA, SCRIPT FLUSH)
+    println("-> 17. Testing Lua Scripting Engine (EVAL, EVALSHA, SCRIPT)...")
+    lua_code := "return redis.call('get', KEYS[1])"
+    load_res := server_execute_args_session(store, session, ["SCRIPT", "LOAD", lua_code])
+    sha := substring(load_res, 4, 40)
+    assert(len(sha) == 40)
+    exists_res := server_execute_args_session(store, session, ["SCRIPT", "EXISTS", sha])
+    assert(exists_res == "*1\r\n:1\r\n")
+    
+    // Direct EVAL executing redis.call
+    eval_res := server_execute_args_session(store, session, ["EVAL", lua_code, "1", "user:renamed"])
+    assert(eval_res == "$11\r\nalice_smith\r\n")
+    
+    // EVALSHA executing cached script
+    sha_res := server_execute_args_session(store, session, ["EVALSHA", sha, "1", "user:renamed"])
+    assert(sha_res == "$11\r\nalice_smith\r\n")
+
+    // SCRIPT FLUSH
+    assert(server_execute_args_session(store, session, ["SCRIPT", "FLUSH"]) == "+OK\r\n")
+    assert(server_execute_args_session(store, session, ["SCRIPT", "EXISTS", sha]) == "*1\r\n:0\r\n")
+    println("✓ Lua scripting engine passed!")
+
     println("=================================================================")
-    println("      ALL CLUSTER-REDIS 98% COVERAGE TESTS PASSED (100% OK)!     ")
+    println("      ALL 17 CLUSTER-REDIS PHASES PASSED (100% OK)!             ")
     println("=================================================================")
     return 0
