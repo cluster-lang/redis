@@ -1,8 +1,8 @@
 // ==============================================================================
 // Module:      Fast O(1) Deque QuickList (quicklist.cl)
 // Project:     Cluster Redis (High-Performance In-Memory Key-Value Store)
-// Author:      mohammadzaid/(cluster) <zkalamgir@proton.me>
-// License:     Cluster Community // License:     MIT License Fair-Source License (CCFL-1.0)
+// Author:      zk-mohammad <ZaidKhan-alamgir@proton.me>
+// License:     Cluster Community & Fair-Source License (CCFL v2.0)
 // Description: Bidirectional doubly-linked deque list engine for Redis LPUSH, RPUSH,
 //              LPOP, RPOP, and LRANGE operations with intrusive node recycling.
 // ==============================================================================

@@ -1,8 +1,8 @@
 // ==============================================================================
 // Module:      In-Memory Storage Engine (store.cl)
 // Project:     Cluster Redis (High-Performance In-Memory Key-Value Store)
-// Author:      mohammadzaid/(cluster) <zkalamgir@proton.me>
-// License:     Cluster Community // License:     MIT License Fair-Source License (CCFL-1.0)
+// Author:      zk-mohammad <ZaidKhan-alamgir@proton.me>
+// License:     Cluster Community & Fair-Source License (CCFL v2.0)
 // Description: Multi-model in-memory database store supporting Strings, Lists, Hashes,
 //              Sets, Sorted Sets (ZSets), TTL expiration, Pub/Sub channels, and .clb snapshot persistence.
 // ==============================================================================

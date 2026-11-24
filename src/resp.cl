@@ -1,8 +1,8 @@
 // ==============================================================================
 // Module:      RESP Protocol Engine (resp.cl)
 // Project:     Cluster Redis (High-Performance In-Memory Key-Value Store)
-// Author:      mohammadzaid/(cluster) <zkalamgir@proton.me>
-// License:     Cluster Community // License:     MIT License Fair-Source License (CCFL-1.0)
+// Author:      zk-mohammad <ZaidKhan-alamgir@proton.me>
+// License:     Cluster Community & Fair-Source License (CCFL v2.0)
 // Description: Redis Serialization Protocol (RESP v2) encoder and stream decoder
 //              supporting Simple Strings, Errors, Integers, Bulk Strings, Arrays,
 //              and Inline CLI command parsing.

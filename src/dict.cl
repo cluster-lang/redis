@@ -1,8 +1,8 @@
 // ==============================================================================
 // Module:      Fast O(1) Hash Table (dict.cl)
 // Project:     Cluster Redis (High-Performance In-Memory Key-Value Store)
-// Author:      mohammadzaid/(cluster) <zkalamgir@proton.me>
-// License:     Cluster Community // License:     MIT License Fair-Source License (CCFL-1.0)
+// Author:      zk-mohammad <ZaidKhan-alamgir@proton.me>
+// License:     Cluster Community & Fair-Source License (CCFL v2.0)
 // Description: High-speed O(1) closed-addressing hash table powered by DJB2 hashing
 //              and intrusive free-list recycling.
 // ==============================================================================
